@@ -151,7 +151,7 @@ int ipsw_extract_to_memory(const char* ipsw, const char* infile, char** pbuffer,
 	}
 
 	int size = zstat.size;
-	char* buffer = (unsigned char*) malloc(size);
+	char* buffer = (unsigned char*) malloc(size+1);
 	if (buffer == NULL) {
 		error("ERROR: Out of memory\n");
 		zip_fclose(zfile);
@@ -164,6 +164,8 @@ int ipsw_extract_to_memory(const char* ipsw, const char* infile, char** pbuffer,
 		free(buffer);
 		return -1;
 	}
+
+	buffer[size] = '\0';
 
 	zip_fclose(zfile);
 	ipsw_close(archive);
@@ -192,6 +194,18 @@ int ipsw_extract_build_manifest(const char* ipsw, plist_t* buildmanifest, int *t
 	if (ipsw_extract_to_memory(ipsw, "BuildManifest.plist", &data, &size) == 0) {
 		*tss_enabled = 1;
 		plist_from_xml(data, size, buildmanifest);
+		return 0;
+	}
+
+	return -1;
+}
+
+int ipsw_extract_restore_plist(const char* ipsw, plist_t* restore_plist) {
+	int size = 0;
+	char* data = NULL;
+
+	if (ipsw_extract_to_memory(ipsw, "Restore.plist", &data, &size) == 0) {
+		plist_from_xml(data, size, restore_plist);
 		return 0;
 	}
 

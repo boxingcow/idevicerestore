@@ -21,6 +21,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <libirecovery.h>
 #include <libimobiledevice/restore.h>
 #include <libimobiledevice/libimobiledevice.h>
@@ -39,24 +40,6 @@ int recovery_progress_callback(irecv_client_t client, const irecv_event_t* event
 	return 0;
 }
 
-int recovery_client_new(struct idevicerestore_client_t* client) {
-	struct recovery_client_t* recovery = (struct recovery_client_t*) malloc(sizeof(struct recovery_client_t));
-	if (recovery == NULL) {
-		error("ERROR: Out of memory\n");
-		return -1;
-	}
-
-	client->recovery = recovery;
-
-	if (recovery_open_with_timeout(client) < 0) {
-		recovery_client_free(client);
-		return -1;
-	}
-
-	client->recovery = recovery;
-	return 0;
-}
-
 void recovery_client_free(struct idevicerestore_client_t* client) {
 	if(client) {
 		if (client->recovery) {
@@ -70,18 +53,19 @@ void recovery_client_free(struct idevicerestore_client_t* client) {
 	}
 }
 
-int recovery_open_with_timeout(struct idevicerestore_client_t* client) {
+int recovery_client_new(struct idevicerestore_client_t* client) {
 	int i = 0;
 	int attempts = 10;
 	irecv_client_t recovery = NULL;
 	irecv_error_t recovery_error = IRECV_E_UNKNOWN_ERROR;
 
 	if(client->recovery == NULL) {
-		if(recovery_client_new(client) < 0) {
-			error("ERROR: Unable to open device in recovery mode\n");
+		client->recovery = (struct recovery_client_t*)malloc(sizeof(struct recovery_client_t));
+		if (client->recovery == NULL) {
+			error("ERROR: Out of memory\n");
 			return -1;
 		}
-		return 0;
+		memset(client->recovery, 0, sizeof(struct recovery_client_t));
 	}
 
 	for (i = 1; i <= attempts; i++) {
@@ -126,11 +110,10 @@ int recovery_check_mode() {
 	return 0;
 }
 
-static int recovery_enable_autoboot(struct idevicerestore_client_t* client) {
+static int recovery_set_autoboot(struct idevicerestore_client_t* client, int enable) {
 	irecv_error_t recovery_error = IRECV_E_SUCCESS;
 
-	//recovery_error = irecv_setenv(client->recovery->client, "auto-boot", "true");
-	recovery_error = irecv_send_command(client->recovery->client, "setenv auto-boot true");
+	recovery_error = irecv_send_command(client->recovery->client, (enable) ? "setenv auto-boot true" : "setenv auto-boot false");
 	if (recovery_error != IRECV_E_SUCCESS) {
 		error("ERROR: Unable to set auto-boot environmental variable\n");
 		return -1;
@@ -149,31 +132,37 @@ int recovery_enter_restore(struct idevicerestore_client_t* client, plist_t build
 	idevice_t device = NULL;
 	restored_client_t restore = NULL;
 
+	if (client->build[0] >= '8') {
+		client->restore_boot_args = strdup("rd=md0 nand-enable-reformat=1 -progress");
+	}
+
 	/* upload data to make device boot restore mode */
 
-	if (recovery_enable_autoboot(client) < 0) {
-		return -1;
+	if(client->recovery == NULL) {
+		if (recovery_client_new(client) < 0) {
+			return -1;
+		}
 	}
 
-	/* send iBEC and run it */
-	if (recovery_send_ibec(client, build_identity) < 0) {
-		error("ERROR: Unable to send iBEC\n");
-		return -1;
+	if ((client->build[0] > '8') && !(client->flags & FLAG_CUSTOM)) {
+		/* send ApTicket */
+		if (recovery_send_ticket(client) < 0) {
+			error("ERROR: Unable to send APTicket\n");
+			return -1;
+		}
 	}
 
-	/* this must be long enough to allow the device to run the iBEC */
-	/* FIXME: Probably better to detect if the device is back then */
-	sleep(4);
+	irecv_send_command(client->recovery->client, "getenv build-version");
+	irecv_send_command(client->recovery->client, "getenv build-style");
+	irecv_send_command(client->recovery->client, "getenv radio-error");
+
+	if (recovery_set_autoboot(client, 0) < 0) {
+		return -1;
+	}
 
 	/* send logo and show it */
 	if (recovery_send_applelogo(client, build_identity) < 0) {
 		error("ERROR: Unable to send AppleLogo\n");
-		return -1;
-	}
-
-	/* send devicetree and load it */
-	if (recovery_send_devicetree(client, build_identity) < 0) {
-		error("ERROR: Unable to send DeviceTree\n");
 		return -1;
 	}
 
@@ -183,25 +172,49 @@ int recovery_enter_restore(struct idevicerestore_client_t* client, plist_t build
 		return -1;
 	}
 
-	// for some reason iboot requires a hard reset after ramdisk
-	//  or things start getting wacky
-	printf("Please unplug your device, then plug it back in\n");
-	printf("Hit any key to continue...");
-	getchar();
+	/* send devicetree and load it */
+	if (recovery_send_devicetree(client, build_identity) < 0) {
+		error("ERROR: Unable to send DeviceTree\n");
+		return -1;
+	}
 
 	if (recovery_send_kernelcache(client, build_identity) < 0) {
 		error("ERROR: Unable to send KernelCache\n");
 		return -1;
 	}
 
-	info("Waiting for device to enter restore mode\n");
-	if (restore_open_with_timeout(client) < 0) {
-		error("ERROR: Unable to connect to device in restore mode\n");
+	client->mode = &idevicerestore_modes[MODE_RESTORE];
+	return 0;
+}
+
+int recovery_send_ticket(struct idevicerestore_client_t* client)
+{
+	if (!client->tss) {
+		error("ERROR: ApTicket requested but no TSS present\n");
+		return -1;		
+	}
+
+	unsigned char* data = NULL;
+	uint32_t size = 0;
+	if (tss_get_ticket(client->tss, &data, &size) < 0) {
+		error("ERROR: Unable to get ApTicket from TSS request\n");			return -1;
+	}
+
+	info("Sending APTicket (%d bytes)\n", size);
+	irecv_error_t error = irecv_send_buffer(client->recovery->client, data, size, 0);
+	if (error != IRECV_E_SUCCESS) {
+		error("ERROR: Unable to send APTicket: %s\n", irecv_strerror(error));
+		free(data);
+		return -1;
+	}
+	free(data);
+
+	error = irecv_send_command(client->recovery->client, "ticket");
+	if (error != IRECV_E_SUCCESS) {
+		error("ERROR: Unable to send ticket command\n");
 		return -1;
 	}
 
-	restore_client_free(client);
-	client->mode = &idevicerestore_modes[MODE_RESTORE];
 	return 0;
 }
 
@@ -214,25 +227,22 @@ int recovery_send_component(struct idevicerestore_client_t* client, plist_t buil
 
 	if (client->tss) {
 		if (tss_get_entry_path(client->tss, component, &path) < 0) {
-			error("ERROR: Unable to get component path\n");
-			return -1;
+			debug("NOTE: No path for component %s in TSS, will fetch from build_identity\n", component);
 		}
-	} else {
+	}
+	if (!path) {
 		if (build_identity_get_component_path(build_identity, component, &path) < 0) {
-			error("ERROR: Unable to get component: %s\n", component);
+			error("ERROR: Unable to get path for component '%s'\n", component);
 			if (path)
 				free(path);
 			return -1;
 		}
 	}
 
-	info("Resetting recovery mode connection...\n");
-	irecv_reset(client->recovery->client);
-
 	if (client->tss)
 		info("%s will be signed\n", component);
 
-	if (ipsw_get_component_by_path(client->ipsw, client->tss, path, &data, &size) < 0) {
+	if (ipsw_get_component_by_path(client->ipsw, client->tss, component, path, &data, &size) < 0) {
 		error("ERROR: Unable to get component: %s\n", component);
 		free(path);
 		return -1;
@@ -276,8 +286,10 @@ int recovery_send_applelogo(struct idevicerestore_client_t* client, plist_t buil
 	irecv_error_t recovery_error = IRECV_E_SUCCESS;
 
 	info("Sending %s...\n", component);
-	if (recovery_open_with_timeout(client) < 0) {
-		return -1;
+	if (client->recovery == NULL) {
+		if (recovery_client_new(client) < 0) {
+			return -1;
+		}
 	}
 
 	if (recovery_send_component(client, build_identity, component) < 0) {
@@ -285,7 +297,7 @@ int recovery_send_applelogo(struct idevicerestore_client_t* client, plist_t buil
 		return -1;
 	}
 
-	recovery_error = irecv_send_command(client->recovery->client, "setpicture 1");
+	recovery_error = irecv_send_command(client->recovery->client, "setpicture 0");
 	if (recovery_error != IRECV_E_SUCCESS) {
 		error("ERROR: Unable to set %s\n", component);
 		return -1;
@@ -305,7 +317,7 @@ int recovery_send_devicetree(struct idevicerestore_client_t* client, plist_t bui
 	irecv_error_t recovery_error = IRECV_E_SUCCESS;
 
 	if(client->recovery == NULL) {
-		if (recovery_open_with_timeout(client) < 0) {
+		if (recovery_client_new(client) < 0) {
 			return -1;
 		}
 	}
@@ -329,7 +341,7 @@ int recovery_send_ramdisk(struct idevicerestore_client_t* client, plist_t build_
 	irecv_error_t recovery_error = IRECV_E_SUCCESS;
 
 	if(client->recovery == NULL) {
-		if (recovery_open_with_timeout(client) < 0) {
+		if (recovery_client_new(client) < 0) {
 			return -1;
 		}
 	}
@@ -339,11 +351,15 @@ int recovery_send_ramdisk(struct idevicerestore_client_t* client, plist_t build_
 		return -1;
 	}
 
+	irecv_send_command(client->recovery->client, "getenv ramdisk-delay");
+
 	recovery_error = irecv_send_command(client->recovery->client, "ramdisk");
 	if (recovery_error != IRECV_E_SUCCESS) {
 		error("ERROR: Unable to execute %s\n", component);
 		return -1;
 	}
+
+	sleep(2);
 
 	return 0;
 }
@@ -352,13 +368,22 @@ int recovery_send_kernelcache(struct idevicerestore_client_t* client, plist_t bu
 	const char* component = "RestoreKernelCache";
 	irecv_error_t recovery_error = IRECV_E_SUCCESS;
 
-	if (recovery_open_with_timeout(client) < 0) {
-		return -1;
+	if (client->recovery == NULL) {
+		if (recovery_client_new(client) < 0) {
+			return -1;
+		}
 	}
 
 	if (recovery_send_component(client, build_identity, component) < 0) {
 		error("ERROR: Unable to send %s to device.\n", component);
 		return -1;
+	}
+
+	if (client->restore_boot_args) {
+		char setba[256];
+		strcpy(setba, "setenv boot-args ");
+		strcat(setba, client->restore_boot_args);
+		recovery_error = irecv_send_command(client->recovery->client, setba);
 	}
 
 	recovery_error = irecv_send_command(client->recovery->client, "bootx");
@@ -374,12 +399,29 @@ int recovery_get_ecid(struct idevicerestore_client_t* client, uint64_t* ecid) {
 	irecv_error_t recovery_error = IRECV_E_SUCCESS;
 
 	if(client->recovery == NULL) {
-		if (recovery_open_with_timeout(client) < 0) {
+		if (recovery_client_new(client) < 0) {
 			return -1;
 		}
 	}
 
-	recovery_error = irecv_get_ecid(client->recovery->client, ecid);
+	recovery_error = irecv_get_ecid(client->recovery->client, (long long unsigned int*)ecid);
+	if (recovery_error != IRECV_E_SUCCESS) {
+		return -1;
+	}
+
+	return 0;
+}
+
+int recovery_get_nonce(struct idevicerestore_client_t* client, unsigned char** nonce, int* nonce_size) {
+	irecv_error_t recovery_error = IRECV_E_SUCCESS;
+
+	if(client->recovery == NULL) {
+		if (recovery_client_new(client) < 0) {
+			return -1;
+		}
+	}
+
+	recovery_error = irecv_get_nonce(client->recovery->client, nonce, nonce_size);
 	if (recovery_error != IRECV_E_SUCCESS) {
 		return -1;
 	}
@@ -391,7 +433,7 @@ int recovery_get_cpid(struct idevicerestore_client_t* client, uint32_t* cpid) {
 	irecv_error_t recovery_error = IRECV_E_SUCCESS;
 
 	if(client->recovery == NULL) {
-		if (recovery_open_with_timeout(client) < 0) {
+		if (recovery_client_new(client) < 0) {
 			return -1;
 		}
 	}
@@ -408,7 +450,7 @@ int recovery_get_bdid(struct idevicerestore_client_t* client, uint32_t* bdid) {
 	irecv_error_t recovery_error = IRECV_E_SUCCESS;
 
 	if(client->recovery == NULL) {
-		if (recovery_open_with_timeout(client) < 0) {
+		if (recovery_client_new(client) < 0) {
 			return -1;
 		}
 	}
@@ -420,3 +462,10 @@ int recovery_get_bdid(struct idevicerestore_client_t* client, uint32_t* bdid) {
 
 	return 0;
 }
+
+int recovery_send_reset(struct idevicerestore_client_t* client)
+{
+	irecv_error_t recovery_error = irecv_send_command(client->recovery->client, "reset");
+	return 0;
+}
+

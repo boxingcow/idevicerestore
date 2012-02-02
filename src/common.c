@@ -20,6 +20,7 @@
  */
 
 #include <stdio.h>
+#include <stdlib.h>
 
 #include "common.h"
 
@@ -40,7 +41,7 @@ int write_file(const char* filename, const void* data, size_t size) {
 	fclose(file);
 
 	if (bytes != size) {
-		error("ERROR: Unable to write entire file: %s: %d of %d\n", filename, bytes, size);
+		error("ERROR: Unable to write entire file: %s: %d of %d\n", filename, (int)bytes, (int)size);
 		return -1;
 	}
 
@@ -107,4 +108,25 @@ void print_progress_bar(double progress) {
 	info("] %3.1f%%", progress);
 	if(progress == 100) info("\n");
 	fflush(stdout);
+}
+
+#define GET_RAND(min, max) ((rand() % (max - min)) + min)
+
+char *generate_guid()
+{
+	char *guid = (char *) malloc(sizeof(char) * 37);
+	const char *chars = "ABCDEF0123456789";
+	srand(time(NULL));
+	int i = 0;
+
+	for (i = 0; i < 36; i++) {
+		if (i == 8 || i == 13 || i == 18 || i == 23) {
+			guid[i] = '-';
+			continue;
+		} else {
+			guid[i] = chars[GET_RAND(0, 16)];
+		}
+	}
+	guid[36] = '\0';
+	return guid;
 }

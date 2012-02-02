@@ -42,7 +42,6 @@ struct recovery_client_t {
 };
 
 int recovery_check_mode();
-int recovery_open_with_timeout(struct idevicerestore_client_t* client);
 int recovery_client_new(struct idevicerestore_client_t* client);
 void recovery_client_free(struct idevicerestore_client_t* client);
 int recovery_send_component(struct idevicerestore_client_t* client, plist_t build_identity, const char* component);
@@ -51,7 +50,9 @@ int recovery_send_applelogo(struct idevicerestore_client_t* client, plist_t buil
 int recovery_send_devicetree(struct idevicerestore_client_t* client, plist_t build_identity);
 int recovery_send_ramdisk(struct idevicerestore_client_t* client, plist_t build_identity);
 int recovery_send_kernelcache(struct idevicerestore_client_t* client, plist_t build_identity);
+int recovery_send_reset(struct idevicerestore_client_t* client);
 int recovery_get_ecid(struct idevicerestore_client_t* client, uint64_t* ecid);
+int recovery_get_nonce(struct idevicerestore_client_t* client, unsigned char** nonce, int* nonce_size);
 int recovery_get_cpid(struct idevicerestore_client_t* client, uint32_t* cpid);
 int recovery_get_bdid(struct idevicerestore_client_t* client, uint32_t* bdid);
 

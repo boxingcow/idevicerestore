@@ -37,14 +37,16 @@ int check_device(struct idevicerestore_client_t* client);
 int get_ecid(struct idevicerestore_client_t* client, uint64_t* ecid);
 int get_bdid(struct idevicerestore_client_t* client, uint32_t* bdid);
 int get_cpid(struct idevicerestore_client_t* client, uint32_t* cpid);
-int get_shsh_blobs(struct idevicerestore_client_t* client, uint64_t ecid, plist_t build_identity, plist_t* tss);
-void build_manifest_print_information(plist_t build_manifest);
+int get_shsh_blobs(struct idevicerestore_client_t* client, uint64_t ecid, unsigned char* nonce, int nonce_size, plist_t build_identity, plist_t* tss);
+void fixup_tss(plist_t tss);
+void build_manifest_get_version_information(plist_t build_manifest, char** product_version, char** product_build);
 plist_t build_manifest_get_build_identity(plist_t build_manifest, uint32_t identity);
 int build_manifest_get_build_count(plist_t build_manifest);
 void build_identity_print_information(plist_t build_identity);
 int build_identity_get_component_path(plist_t build_identity, const char* component, char** path);
 int ipsw_extract_filesystem(const char* ipsw, plist_t build_identity, char** filesystem);
-int ipsw_get_component_by_path(const char* ipsw, plist_t tss, const char* path, char** data, uint32_t* size);
+int ipsw_get_component_by_path(const char* ipsw, plist_t tss, const char* component, const char* path, char** data, uint32_t* size);
+const char* get_component_name(const char* filename);
 
 #ifdef __cplusplus
 }

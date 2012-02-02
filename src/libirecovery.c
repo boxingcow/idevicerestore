@@ -33,6 +33,8 @@
 
 #include "libirecovery.h"
 
+#define USB_TIMEOUT 5000
+
 #define BUFFER_SIZE 0x1000
 #define debug(...) if(libirecovery_debug) fprintf(stderr, __VA_ARGS__)
 
@@ -291,7 +293,7 @@ int irecv_get_string_descriptor_ascii(irecv_client_t client, uint8_t desc_index,
 	memset(data, 0, sizeof(data));
 	memset(buffer, 0, size);
 
-	ret = irecv_control_transfer(client, 0x80, 0x06, (0x03 << 8) | desc_index, langid, data, sizeof(data), 1000);
+	ret = irecv_control_transfer(client, 0x80, 0x06, (0x03 << 8) | desc_index, langid, data, sizeof(data), USB_TIMEOUT);
 	
 	if (ret < 0) return ret;
 	if (data[1] != 0x03) return IRECV_E_UNKNOWN_ERROR;
@@ -360,13 +362,13 @@ irecv_error_t irecv_open(irecv_client_t* pclient) {
 				client->interface = 0;
 				client->handle = usb_handle;
 				client->mode = usb_descriptor.idProduct;
-				
+
 
 				error = irecv_set_configuration(client, 1);
 				if (error != IRECV_E_SUCCESS) {
 					return error;
 				}
-				
+
 				if (client->mode != kDfuMode) {
 					error = irecv_set_interface(client, 0, 0);
 					error = irecv_set_interface(client, 1, 1);
@@ -458,6 +460,10 @@ irecv_error_t irecv_open_attempts(irecv_client_t* pclient, int attempts) {
 	int i;
 
 	for (i = 0; i < attempts; i++) {
+		if(*pclient) {
+			irecv_close(*pclient);
+			*pclient = NULL;
+		}
 		if (irecv_open(pclient) != IRECV_E_SUCCESS) {
 			debug("Connection failed. Waiting 1 sec before retry.\n");
 			sleep(1);
@@ -581,7 +587,7 @@ static irecv_error_t irecv_send_command_raw(irecv_client_t client, char* command
 	}
 
 	if (length > 0) {
-		int ret = irecv_control_transfer(client, 0x40, 0, 0, 0, (unsigned char*) command, length + 1, 1000);
+		int ret = irecv_control_transfer(client, 0x40, 0, 0, 0, (unsigned char*) command, length + 1, USB_TIMEOUT);
 	}
 
 	return IRECV_E_SUCCESS;
@@ -664,7 +670,7 @@ irecv_error_t irecv_get_status(irecv_client_t client, unsigned int* status) {
 
 	unsigned char buffer[6];
 	memset(buffer, '\0', 6);
-	if (irecv_control_transfer(client, 0xA1, 3, 0, 0, buffer, 6, 1000) != 6) {
+	if (irecv_control_transfer(client, 0xA1, 3, 0, 0, buffer, 6, USB_TIMEOUT) != 6) {
 		*status = 0;
 		return IRECV_E_USB_STATUS;
 	}
@@ -678,7 +684,7 @@ irecv_error_t irecv_send_buffer(irecv_client_t client, unsigned char* buffer, un
 	int recovery_mode = (client->mode != kDfuMode);
 	if (check_context(client) != IRECV_E_SUCCESS) return IRECV_E_NO_DEVICE;
 
-	int packet_size = 0x800;
+	int packet_size = recovery_mode ? 0x8000 : 0x800;
 	int last = length % packet_size;
 	int packets = length / packet_size;
 	if (last != 0) {
@@ -689,9 +695,14 @@ irecv_error_t irecv_send_buffer(irecv_client_t client, unsigned char* buffer, un
 
 	/* initiate transfer */
 	if (recovery_mode) {
-		error = irecv_control_transfer(client, 0x41, 0, 0, 0, NULL, 0, 1000);
+		error = irecv_control_transfer(client, 0x41, 0, 0, 0, NULL, 0, USB_TIMEOUT);
 	} else {
-		error = irecv_control_transfer(client, 0x21, 4, 0, 0, NULL, 0, 1000);
+		char dump[4];
+		if (irecv_control_transfer(client, 0xa1, 5, 0, 0, dump, 1, USB_TIMEOUT) == 1) {
+			error = IRECV_E_SUCCESS;
+		} else {
+			error = IRECV_E_USB_UPLOAD;
+		}
 	}
 	if (error != IRECV_E_SUCCESS) {
 		return error;
@@ -707,9 +718,9 @@ irecv_error_t irecv_send_buffer(irecv_client_t client, unsigned char* buffer, un
 
 		/* Use bulk transfer for recovery mode and control transfer for DFU and WTF mode */
 		if (recovery_mode) {
-			error = irecv_bulk_transfer(client, 0x04, &buffer[i * packet_size], size, &bytes, 1000);
+			error = irecv_bulk_transfer(client, 0x04, &buffer[i * packet_size], size, &bytes, USB_TIMEOUT);
 		} else {
-			bytes = irecv_control_transfer(client, 0x21, 1, 0, 0, &buffer[i * packet_size], size, 1000);
+			bytes = irecv_control_transfer(client, 0x21, 1, i, 0, &buffer[i * packet_size], size, USB_TIMEOUT);
 		}
 
 		if (bytes != size) {
@@ -742,9 +753,9 @@ irecv_error_t irecv_send_buffer(irecv_client_t client, unsigned char* buffer, un
 	}
 
 	if (dfuNotifyFinished && !recovery_mode) {
-		irecv_control_transfer(client, 0x21, 1, 0, 0, (unsigned char*) buffer, 0, 1000);
+		irecv_control_transfer(client, 0x21, 1, packets, 0, (unsigned char*) buffer, 0, USB_TIMEOUT);
 
-		for (i = 0; i < 3; i++) {
+		for (i = 0; i < 2; i++) {
 			error = irecv_get_status(client, &status);
 			if (error != IRECV_E_SUCCESS) {
 				return error;
@@ -762,7 +773,7 @@ irecv_error_t irecv_receive(irecv_client_t client) {
 	if (check_context(client) != IRECV_E_SUCCESS) return IRECV_E_NO_DEVICE;
 
 	int bytes = 0;
-	while (irecv_bulk_transfer(client, 0x81, (unsigned char*) buffer, BUFFER_SIZE, &bytes, 500) == 0) {
+	while (irecv_bulk_transfer(client, 0x81, (unsigned char*) buffer, BUFFER_SIZE, &bytes, 1000) == 0) {
 		if (bytes > 0) {
 			if (client->received_callback != NULL) {
 				irecv_event_t event;
@@ -773,7 +784,6 @@ irecv_error_t irecv_receive(irecv_client_t client) {
 					return IRECV_E_SUCCESS;
 				}
 			}
-			if (bytes < BUFFER_SIZE) break;
 		} else break;
 	}
 
@@ -806,7 +816,7 @@ irecv_error_t irecv_getenv(irecv_client_t client, const char* variable, char** v
 	}
 
 	memset(response, '\0', 256);
-	ret = irecv_control_transfer(client, 0xC0, 0, 0, 0, (unsigned char*) response, 255, 1000);
+	ret = irecv_control_transfer(client, 0xC0, 0, 0, 0, (unsigned char*) response, 255, USB_TIMEOUT);
 
 	*value = response;
 	return IRECV_E_SUCCESS;
@@ -823,7 +833,7 @@ irecv_error_t irecv_getret(irecv_client_t client, unsigned int* value) {
 	}
 
 	memset(response, '\0', 256);
-	ret = irecv_control_transfer(client, 0xC0, 0, 0, 0, (unsigned char*) response, 255, 1000);
+	ret = irecv_control_transfer(client, 0xC0, 0, 0, 0, (unsigned char*) response, 255, USB_TIMEOUT);
 
 	*value = (unsigned int) *response;
 	return IRECV_E_SUCCESS;
@@ -907,9 +917,62 @@ irecv_error_t irecv_get_imei(irecv_client_t client, unsigned char* imei) {
 	return IRECV_E_SUCCESS;
 }
 
+irecv_error_t irecv_get_nonce(irecv_client_t client, unsigned char** nonce, int* nonce_size) {
+	if (check_context(client) != IRECV_E_SUCCESS) return IRECV_E_NO_DEVICE;
+
+	unsigned char buf[255];
+	int len;
+
+	*nonce = NULL;
+	*nonce_size = 0;
+
+	len = irecv_get_string_descriptor_ascii(client, 1, (unsigned char*) buf, 255);
+	debug("%s: got length: %d\n", __func__, len);
+	if (len < 0) {
+		return len;
+	}
+
+	buf[len] = 0;
+	debug("%s: buf='%s'\n", __func__, buf);
+
+	char* nonce_string = strstr(buf, "NONC:");
+	if (nonce_string == NULL) {
+		return IRECV_E_UNKNOWN_ERROR;
+	}
+	nonce_string+=5;
+
+	int nlen = (len - ((unsigned char*)nonce_string - &buf[0])) / 2;
+	unsigned char *nn = malloc(nlen);
+	if (!nn) {
+		return IRECV_E_OUT_OF_MEMORY;
+	}
+
+	int i = 0;
+	for (i = 0; i < nlen; i++) {
+		int val = 0;
+		if (sscanf(nonce_string+(i*2), "%02X", &val) == 1) {
+			nn[i] = (unsigned char)val;
+		} else {
+			error("%s: ERROR: unexpected data in nonce result (%2s)\n", __func__, nonce_string+(i*2));
+			break;
+		}
+	}
+
+	if (i != nlen) {
+		error("%s: ERROR: unable to parse nonce\n");
+		free(nn);
+		return IRECV_E_UNKNOWN_ERROR;
+	}
+
+	*nonce = nn;
+	*nonce_size = nlen;
+
+	return IRECV_E_SUCCESS;
+}
+
 irecv_error_t irecv_send_exploit(irecv_client_t client) {
 	if (check_context(client) != IRECV_E_SUCCESS) return IRECV_E_NO_DEVICE;
-	irecv_control_transfer(client, 0x21, 2, 0, 0, NULL, 0, 1000);
+	irecv_control_transfer(client, 0x21, 2, 0, 0, NULL, 0, USB_TIMEOUT);
 	return IRECV_E_SUCCESS;
 }
 
@@ -1078,7 +1141,7 @@ int irecv_read_file(const char* filename, char** data, uint32_t* size) {
 irecv_error_t irecv_reset_counters(irecv_client_t client) {
 	if (check_context(client) != IRECV_E_SUCCESS) return IRECV_E_NO_DEVICE;
 	if (client->mode == kDfuMode) {
-		irecv_control_transfer(client, 0x21, 4, 0, 0, 0, 0, 1000);
+		irecv_control_transfer(client, 0x21, 4, 0, 0, 0, 0, USB_TIMEOUT);
 	}
 	return IRECV_E_SUCCESS;
 }
@@ -1105,7 +1168,7 @@ irecv_error_t irecv_recv_buffer(irecv_client_t client, char* buffer, unsigned lo
 	unsigned int status = 0;
 	for (i = 0; i < packets; i++) {
 		unsigned short size = (i+1) < packets ? packet_size : last;
-		bytes = irecv_control_transfer(client, 0xA1, 2, 0, 0, &buffer[i * packet_size], size, 1000);
+		bytes = irecv_control_transfer(client, 0xA1, 2, 0, 0, &buffer[i * packet_size], size, USB_TIMEOUT);
 		
 		if (bytes != size) {
 			return IRECV_E_USB_UPLOAD;
@@ -1133,7 +1196,7 @@ irecv_error_t irecv_finish_transfer(irecv_client_t client) {
 
 	if (check_context(client) != IRECV_E_SUCCESS) return IRECV_E_NO_DEVICE;
 
-	irecv_control_transfer(client, 0x21, 1, 0, 0, 0, 0, 1000);
+	irecv_control_transfer(client, 0x21, 1, 0, 0, 0, 0, USB_TIMEOUT);
 
 	for(i = 0; i < 3; i++){
 		irecv_get_status(client, &status);

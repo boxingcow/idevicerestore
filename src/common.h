@@ -91,6 +91,7 @@ extern "C" {
 #define FLAG_ERASE           4
 #define FLAG_CUSTOM          8
 #define FLAG_EXCLUDE        16
+#define FLAG_PWN            32
 
 extern int use_apple_server;
 
@@ -126,6 +127,8 @@ struct idevicerestore_client_t {
 	int flags;
 	plist_t tss;
 	uint64_t ecid;
+	unsigned char* nonce;
+	int nonce_size;
 	const char* uuid;
 	const char* ipsw;
 	const char* filesystem;
@@ -136,6 +139,9 @@ struct idevicerestore_client_t {
 	struct idevicerestore_device_t* device;
 	struct idevicerestore_entry_t** entries;
 	struct idevicerestore_mode_t* mode;
+	char* version;
+	char* build;
+	char* restore_boot_args;
 };
 
 static struct idevicerestore_mode_t idevicerestore_modes[] = {
@@ -170,6 +176,8 @@ void debug_plist(plist_t plist);
 void print_progress_bar(double progress);
 int read_file(const char* filename, void** data, size_t* size);
 int write_file(const char* filename, const void* data, size_t size);
+
+char *generate_guid();
 
 extern struct idevicerestore_client_t* idevicerestore;
 
