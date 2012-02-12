@@ -69,7 +69,7 @@ int recovery_client_new(struct idevicerestore_client_t* client) {
 	}
 
 	for (i = 1; i <= attempts; i++) {
-		recovery_error = irecv_open(&recovery);
+		recovery_error = irecv_open(&recovery, client->ecid);
 		if (recovery_error == IRECV_E_SUCCESS) {
 			break;
 		}
@@ -83,23 +83,33 @@ int recovery_client_new(struct idevicerestore_client_t* client) {
 		debug("Retrying connection...\n");
 	}
 
+	if (client->srnm == NULL) {
+		char snbuf[256];
+		snbuf[0] = '\0';
+		irecv_get_srnm(recovery, snbuf);
+		if (snbuf[0] != '\0') {
+			client->srnm = strdup(snbuf);
+			info("INFO: device serial number is %s\n", client->srnm);
+		}
+	}
+
 	irecv_event_subscribe(recovery, IRECV_PROGRESS, &recovery_progress_callback, NULL);
 	client->recovery->client = recovery;
 	return 0;
 }
 
-int recovery_check_mode() {
+int recovery_check_mode(struct idevicerestore_client_t* client) {
 	irecv_client_t recovery = NULL;
 	irecv_error_t recovery_error = IRECV_E_SUCCESS;
 
 	irecv_init();
-	recovery_error=irecv_open(&recovery);
+	recovery_error=irecv_open(&recovery, client->ecid);
 
 	if (recovery_error != IRECV_E_SUCCESS) {
 		return -1;
 	}
 
-	if (recovery->mode == kDfuMode) {
+	if ((recovery->mode == kDfuMode) || (recovery->mode == kWTFMode)) {
 		irecv_close(recovery);
 		return -1;
 	}
@@ -152,13 +162,13 @@ int recovery_enter_restore(struct idevicerestore_client_t* client, plist_t build
 		}
 	}
 
-	irecv_send_command(client->recovery->client, "getenv build-version");
-	irecv_send_command(client->recovery->client, "getenv build-style");
-	irecv_send_command(client->recovery->client, "getenv radio-error");
-
 	if (recovery_set_autoboot(client, 0) < 0) {
 		return -1;
 	}
+
+	irecv_send_command(client->recovery->client, "getenv build-version");
+	irecv_send_command(client->recovery->client, "getenv build-style");
+	irecv_send_command(client->recovery->client, "getenv radio-error");
 
 	/* send logo and show it */
 	if (recovery_send_applelogo(client, build_identity) < 0) {

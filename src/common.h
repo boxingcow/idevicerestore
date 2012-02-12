@@ -47,6 +47,7 @@ extern "C" {
 #define CPID_IPAD21       8940
 #define CPID_IPAD22       8940
 #define CPID_IPAD23       8940
+#define CPID_IPHONE4S     8940
 
 #define BDID_UNKNOWN        -1
 #define BDID_IPHONE2G        0
@@ -63,6 +64,7 @@ extern "C" {
 #define BDID_IPAD21          4
 #define BDID_IPAD22          6
 #define BDID_IPAD23          2
+#define BDID_IPHONE4S        8
 
 #define DEVICE_UNKNOWN      -1
 #define DEVICE_IPHONE2G      0
@@ -79,12 +81,14 @@ extern "C" {
 #define DEVICE_IPAD21       11
 #define DEVICE_IPAD22       12
 #define DEVICE_IPAD23       13
+#define DEVICE_IPHONE4S     14
 
 #define MODE_UNKNOWN        -1
-#define MODE_DFU             0
-#define MODE_RECOVERY        1
-#define MODE_RESTORE         2
-#define MODE_NORMAL          3
+#define MODE_WTF             0
+#define MODE_DFU             1
+#define MODE_RECOVERY        2
+#define MODE_RESTORE         3
+#define MODE_NORMAL          4
 
 #define FLAG_QUIT            1
 #define FLAG_DEBUG           2
@@ -126,10 +130,12 @@ struct idevicerestore_device_t {
 struct idevicerestore_client_t {
 	int flags;
 	plist_t tss;
+	plist_t version_data;
 	uint64_t ecid;
 	unsigned char* nonce;
 	int nonce_size;
-	const char* uuid;
+	char* uuid;
+	char* srnm;
 	const char* ipsw;
 	const char* filesystem;
 	struct dfu_client_t* dfu;
@@ -145,10 +151,11 @@ struct idevicerestore_client_t {
 };
 
 static struct idevicerestore_mode_t idevicerestore_modes[] = {
-	{  0, "DFU"      },
-	{  1, "Recovery" },
-	{  2, "Restore"  },
-	{  3, "Normal"   },
+	{  0, "WTF"      },
+	{  1, "DFU"      },
+	{  2, "Recovery" },
+	{  3, "Restore"  },
+	{  4, "Normal"   },
 	{ -1,  NULL      }
 };
 
@@ -163,10 +170,11 @@ static struct idevicerestore_device_t idevicerestore_devices[] = {
 	{  7, "iPhone3,1", "N90AP",  0,  8930 },
 	{  8, "iPod4,1", "N81AP",  8,  8930 },
 	{  9, "AppleTV2,1", "K66AP",  10,  8930 },
-	{  10, "iPhone3,1", "N92AP",  6,  8930 },
+	{  10, "iPhone3,3", "N92AP",  6,  8930 },
 	{  11, "iPad2,1", "K93AP",  4,  8940 },
 	{  12, "iPad2,2", "K94AP",  6,  8940 },
 	{  13, "iPad2,3", "K95AP",  2,  8940 },
+	{  14, "iPhone4,1", "N94AP",  8,  8940 },
 	{ -1,  NULL,        NULL,   -1,    -1 }
 };
 
@@ -178,6 +186,16 @@ int read_file(const char* filename, void** data, size_t* size);
 int write_file(const char* filename, const void* data, size_t size);
 
 char *generate_guid();
+
+#ifdef WIN32
+#include <windows.h>
+#define __mkdir(path, mode) mkdir(path)
+#define FMT_qu "%I64u"
+#define sleep(x) Sleep(x*1000)
+#else
+#define __mkdir(path, mode) mkdir(path, mode)
+#define FMT_qu "%qu"
+#endif
 
 extern struct idevicerestore_client_t* idevicerestore;
 

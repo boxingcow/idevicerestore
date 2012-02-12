@@ -34,14 +34,18 @@
 #include "common.h"
 #include "normal.h"
 #include "restore.h"
+#include "download.h"
 #include "recovery.h"
 #include "idevicerestore.h"
 
 #include "limera1n.h"
 
+#define VERSION_XML "cache/version.xml"
+
 int use_apple_server;
 
 static struct option longopts[] = {
+	{ "ecid",    required_argument, NULL, 'i' },
 	{ "uuid",    required_argument, NULL, 'u' },
 	{ "debug",   no_argument,       NULL, 'd' },
 	{ "help",    no_argument,       NULL, 'h' },
@@ -58,16 +62,72 @@ void usage(int argc, char* argv[]) {
 	char* name = strrchr(argv[0], '/');
 	printf("Usage: %s [OPTIONS] FILE\n", (name ? name + 1 : argv[0]));
 	printf("Restore/upgrade IPSW firmware FILE to an iPhone/iPod Touch.\n");
-	printf("  -u, --uuid UUID\ttarget specific device by its 40-digit device UUID\n");
-	printf("  -d, --debug\t\tenable communication debugging\n");
-	printf("  -h, --help\t\tprints usage information\n");
-	printf("  -e, --erase\t\tperform a full restore, erasing all data\n");
-	printf("  -c, --custom\t\trestore with a custom firmware\n");
-	printf("  -s, --cydia\t\tuse Cydia's signature service instead of Apple's\n");
-	printf("  -x, --exclude\t\texclude nor/baseband upgrade\n");
-	printf("  -t, --shsh\t\tfetch TSS record and save to .shsh file, then exit\n");
-	printf("  -p, --pwn\t\tPut device in pwned DFU state and exit (limera1n devices only)\n");
+	printf("  -i|--ecid ECID  target specific device by its hexadecimal ECID\n");
+	printf("                  e.g. 0xaabb123456 or 00000012AABBCCDD\n");
+	printf("  -u|--uuid UUID  target specific device by its 40-digit device UUID\n");
+	printf("                  NOTE: only works with devices in normal mode.\n");
+	printf("  -d|--debug      enable communication debugging\n");
+	printf("  -h|--help       prints usage information\n");
+	printf("  -e|--erase      perform a full restore, erasing all data\n");
+	printf("  -c|--custom     restore with a custom firmware\n");
+	printf("  -s|--cydia      use Cydia's signature service instead of Apple's\n");
+	printf("  -x|--exclude    exclude nor/baseband upgrade\n");
+	printf("  -t|--shsh       fetch TSS record and save to .shsh file, then exit\n");
+	printf("  -p|--pwn        Put device in pwned DFU mode and exit (limera1n devices only)\n");
 	printf("\n");
+}
+
+static int load_version_data(struct idevicerestore_client_t* client)
+{
+	if (!client) {
+		return -1;
+	}
+
+	struct stat fst;
+	int cached = 0;
+
+	if ((stat(VERSION_XML, &fst) < 0) || ((time(NULL)-86400) > fst.st_mtime)) {
+		char tmpf[256];
+		tmpf[0] = '\0';
+		if (!tmpnam(tmpf) || (tmpf[0] == '\0')) {
+			error("ERROR: Could not get temporary filename\n");
+			return -1;
+		}
+
+		if (download_to_file("http://ax.itunes.apple.com/check/version", tmpf) == 0) {
+			__mkdir("cache", 0755);
+			remove(VERSION_XML);
+			if (rename(tmpf, VERSION_XML) < 0) {
+				error("ERROR: Could not update '" VERSION_XML "'\n");
+			} else {
+				info("NOTE: Updated version data.\n");
+			}
+		}
+	} else {
+		cached = 1;
+	}
+
+	char *verbuf = NULL;
+	size_t verlen = 0;
+	read_file(VERSION_XML, (void**)&verbuf, &verlen);
+	if (!verbuf) {
+		error("ERROR: Could not load '" VERSION_XML "'.\n");
+		return -1;
+	}
+
+	client->version_data = NULL;
+	plist_from_xml(verbuf, verlen, &client->version_data);
+
+	if (!client->version_data) {
+		error("ERROR: Cannot parse plist data from '" VERSION_XML "'.\n");
+		return -1;
+	}
+
+	if (cached) {
+		info("NOTE: using cached version data\n");
+	}
+
+	return 0;
 }
 
 int main(int argc, char* argv[]) {
@@ -88,7 +148,7 @@ int main(int argc, char* argv[]) {
 	}
 	memset(client, '\0', sizeof(struct idevicerestore_client_t));
 
-	while ((opt = getopt_long(argc, argv, "dhcesxtpu:", longopts, &optindex)) > 0) {
+	while ((opt = getopt_long(argc, argv, "dhcesxtpi:u:", longopts, &optindex)) > 0) {
 		switch (opt) {
 		case 'h':
 			usage(argc, argv);
@@ -109,9 +169,24 @@ int main(int argc, char* argv[]) {
 
 		case 's':
 			use_apple_server=0;
+			break;
 
 		case 'x':
 			client->flags |= FLAG_EXCLUDE;
+			break;
+
+		case 'i':
+			if (optarg) {
+				char* tail = NULL;
+				client->ecid = strtoull(optarg, &tail, 16);
+				if (tail && (tail[0] != '\0')) {
+					client->ecid = 0;
+				}
+				if (client->ecid == 0) {
+					error("ERROR: Could not parse ECID from '%s'\n", optarg);
+					return -1;
+				}
+			}
 			break;
 
 		case 'u':
@@ -150,12 +225,73 @@ int main(int argc, char* argv[]) {
 	client->uuid = uuid;
 	client->ipsw = ipsw;
 
+	// update version data (from cache, or apple if too old)
+	load_version_data(client);
+
 	// check which mode the device is currently in so we know where to start
 	if (check_mode(client) < 0 || client->mode->index == MODE_UNKNOWN) {
 		error("ERROR: Unable to discover device mode. Please make sure a device is attached.\n");
 		return -1;
 	}
 	info("Found device in %s mode\n", client->mode->string);
+
+	if (client->mode->index == MODE_WTF) {
+		int cpid = 0;
+
+		if (dfu_client_new(client) != 0) {
+			error("ERROR: Could not open device in WTF mode\n");
+			return -1;
+		}
+		if ((dfu_get_cpid(client, &cpid) < 0) || (cpid == 0)) { 
+			error("ERROR: Could not get CPID for WTF mode device\n");
+			dfu_client_free(client);
+			return -1;
+		}
+
+		char* s_wtfurl = NULL;
+		plist_t wtfurl = plist_access_path(client->version_data, 7, "MobileDeviceSoftwareVersionsByVersion", "5", "RecoverySoftwareVersions", "WTF", "304218112", "5", "FirmwareURL");
+		if (wtfurl && (plist_get_node_type(wtfurl) == PLIST_STRING)) {
+			plist_get_string_val(wtfurl, &s_wtfurl);
+		}
+		if (!s_wtfurl) {
+			info("Using hardcoded x12220000_5_Recovery.ipsw URL\n");
+			s_wtfurl = strdup("http://appldnld.apple.com.edgesuite.net/content.info.apple.com/iPhone/061-6618.20090617.Xse7Y/x12220000_5_Recovery.ipsw");
+		}
+
+		// make a local file name
+		char* fnpart = strrchr(s_wtfurl, '/');
+		if (!fnpart) {
+			fnpart = "x12220000_5_Recovery.ipsw";
+		} else {
+			fnpart++;
+		}
+		struct stat fst;
+		char wtfipsw[256];
+		sprintf(wtfipsw, "cache/%s", fnpart);
+		if (stat(wtfipsw, &fst) != 0) {
+			__mkdir("cache", 0755);
+			download_to_file(s_wtfurl, wtfipsw);
+		}
+
+		char wtfname[256];
+		sprintf(wtfname, "Firmware/dfu/WTF.s5l%04dxall.RELEASE.dfu", cpid);
+		char* wtftmp = NULL;
+		uint32_t wtfsize = 0;
+		ipsw_extract_to_memory(wtfipsw, wtfname, &wtftmp, &wtfsize);
+		if (!wtftmp) {
+			error("ERROR: Could not extract WTF\n");
+		} else {
+			if (dfu_send_buffer(client, wtftmp, wtfsize) != 0) {
+				error("ERROR: Could not send WTF...\n");
+			}
+		}
+		dfu_client_free(client);
+
+		sleep(1);
+
+		free(wtftmp);
+		client->mode = &idevicerestore_modes[MODE_DFU];
+	}
 
 	// discover the device type
 	if (check_device(client) < 0 || client->device->index == DEVICE_UNKNOWN) {
@@ -403,7 +539,7 @@ int main(int argc, char* argv[]) {
 			error("ERROR: Unable to find device ECID\n");
 			return -1;
 		}
-		info("Found ECID %llu\n", (long long unsigned int)client->ecid);
+		info("Found ECID " FMT_qu "\n", (long long unsigned int)client->ecid);
 
 		if (get_shsh_blobs(client, client->ecid, NULL, 0, build_identity, &client->tss) < 0) {
 			error("ERROR: Unable to get SHSH blobs for this device\n");
@@ -426,8 +562,8 @@ int main(int argc, char* argv[]) {
 			plist_to_bin(client->tss, &bin, &blen);
 			if (bin) {
 				char zfn[512];
-				sprintf(zfn, "shsh/%lld-%s-%s.shsh", (long long int)client->ecid, client->device->product, client->version);
-				mkdir("shsh", 0755);
+				sprintf(zfn, "shsh/" FMT_qu "-%s-%s.shsh", (long long int)client->ecid, client->device->product, client->version);
+				__mkdir("shsh", 0755);
 				struct stat fst;
 				if (stat(zfn, &fst) != 0) {
 					gzFile zf = gzopen(zfn, "wb");
@@ -569,6 +705,10 @@ int main(int argc, char* argv[]) {
 
 	// now finally do the magic to put the device into restore mode
 	if (client->mode->index == MODE_RECOVERY) {
+		if (client->srnm == NULL) {
+			error("ERROR: could not retrieve device serial number. Can't continue.\n");
+			return -1;
+		}
 		if (recovery_enter_restore(client, build_identity) < 0) {
 			error("ERROR: Unable to place device into restore mode\n");
 			plist_free(buildmanifest);
@@ -597,20 +737,21 @@ int main(int argc, char* argv[]) {
 
 int check_mode(struct idevicerestore_client_t* client) {
 	int mode = MODE_UNKNOWN;
+	int dfumode = MODE_UNKNOWN;
 
-	if (recovery_check_mode() == 0) {
+	if (recovery_check_mode(client) == 0) {
 		mode = MODE_RECOVERY;
 	}
 
-	else if (dfu_check_mode() == 0) {
-		mode = MODE_DFU;
+	else if (dfu_check_mode(client, &dfumode) == 0) {
+		mode = dfumode;
 	}
 
-	else if (normal_check_mode(client->uuid) == 0) {
+	else if (normal_check_mode(client) == 0) {
 		mode = MODE_NORMAL;
 	}
 
-	else if (restore_check_mode(client->uuid) == 0) {
+	else if (!client->ecid && client->uuid && (restore_check_mode(client->uuid) == 0)) {
 		mode = MODE_RESTORE;
 	}
 
@@ -625,14 +766,16 @@ int check_device(struct idevicerestore_client_t* client) {
 
 	switch (client->mode->index) {
 	case MODE_RESTORE:
-		device = restore_check_device(client->uuid);
-		if (device < 0) {
-			device = DEVICE_UNKNOWN;
+		if (!client->ecid && client->uuid) {
+			device = restore_check_device(client->uuid);
+			if (device < 0) {
+				device = DEVICE_UNKNOWN;
+			}
 		}
 		break;
 
 	case MODE_NORMAL:
-		device = normal_check_device(client->uuid);
+		device = normal_check_device(client);
 		if (device < 0) {
 			device = DEVICE_UNKNOWN;
 		}
@@ -739,6 +882,10 @@ int check_device(struct idevicerestore_client_t* client) {
 				device = DEVICE_IPAD23;
 				break;
 
+			case BDID_IPHONE4S:
+				device = DEVICE_IPHONE4S;
+				break;
+
 			default:
 				device = DEVICE_UNKNOWN;
 				break;
@@ -764,7 +911,7 @@ int check_device(struct idevicerestore_client_t* client) {
 int get_bdid(struct idevicerestore_client_t* client, uint32_t* bdid) {
 	switch (client->mode->index) {
 	case MODE_NORMAL:
-		if (normal_get_bdid(client->uuid, bdid) < 0) {
+		if (normal_get_bdid(client, bdid) < 0) {
 			*bdid = 0;
 			return -1;
 		}
@@ -789,7 +936,7 @@ int get_bdid(struct idevicerestore_client_t* client, uint32_t* bdid) {
 int get_cpid(struct idevicerestore_client_t* client, uint32_t* cpid) {
 	switch (client->mode->index) {
 	case MODE_NORMAL:
-		if (normal_get_cpid(client->uuid, cpid) < 0) {
+		if (normal_get_cpid(client, cpid) < 0) {
 			client->device->chip_id = -1;
 			return -1;
 		}
@@ -814,7 +961,7 @@ int get_cpid(struct idevicerestore_client_t* client, uint32_t* cpid) {
 int get_ecid(struct idevicerestore_client_t* client, uint64_t* ecid) {
 	switch (client->mode->index) {
 	case MODE_NORMAL:
-		if (normal_get_ecid(client->uuid, ecid) < 0) {
+		if (normal_get_ecid(client, ecid) < 0) {
 			*ecid = 0;
 			return -1;
 		}
@@ -891,13 +1038,13 @@ int get_shsh_blobs(struct idevicerestore_client_t* client, uint64_t ecid, unsign
 	plist_t response = NULL;
 	*tss = NULL;
 
-	if ((client->build[0] <= 8) || (client->flags & FLAG_CUSTOM)) {
+	if ((client->build[0] <= '8') || (client->flags & FLAG_CUSTOM)) {
 		error("checking for local shsh\n");
 
 		/* first check for local copy */
 		char zfn[512];
 		if (client->version) {
-			sprintf(zfn, "shsh/%lld-%s-%s.shsh", (long long int)client->ecid, client->device->product, client->version);
+			sprintf(zfn, "shsh/" FMT_qu "-%s-%s.shsh", (long long int)client->ecid, client->device->product, client->version);
 			struct stat fst;
 			if (stat(zfn, &fst) == 0) {
 				gzFile zf = gzopen(zfn, "rb");
