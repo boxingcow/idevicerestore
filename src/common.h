@@ -96,6 +96,7 @@ extern "C" {
 #define FLAG_CUSTOM          8
 #define FLAG_EXCLUDE        16
 #define FLAG_PWN            32
+#define FLAG_NOACTION       64
 
 extern int use_apple_server;
 
@@ -191,7 +192,9 @@ char *generate_guid();
 #include <windows.h>
 #define __mkdir(path, mode) mkdir(path)
 #define FMT_qu "%I64u"
+#ifndef sleep
 #define sleep(x) Sleep(x*1000)
+#endif
 #else
 #define __mkdir(path, mode) mkdir(path, mode)
 #define FMT_qu "%qu"
